@@ -6,7 +6,8 @@
 	"type": "module",
 	"module": "src/index.ts",
 	"scripts": {
-		"build": "bun build --compile --target bun --outfile m2tg src/index.ts"
+		"build": "bun build --compile --target bun --outfile m2tg src/index.ts",
+		"crossbuild": "bun src/build.ts"
 	},
 	"dependencies": {
 		"elysia": "^1.4.28"
