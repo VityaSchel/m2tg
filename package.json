@@ -1,0 +1,23 @@
+{
+	"name": "buntysep",
+	"private": true,
+	"license": "MIT",
+	"author": "Viktor Shchelochkov <hi@hloth.dev> (https://hloth.dev)",
+	"type": "module",
+	"module": "src/index.ts",
+	"dependencies": {
+		"elysia": "^1.4.28"
+	},
+	"devDependencies": {
+		"@eslint/js": "^10.0.1",
+		"@types/bun": "latest",
+		"eslint": "^10.1.0",
+		"eslint-config-prettier": "^10.1.8",
+		"globals": "^17.4.0",
+		"prettier": "^3.8.1",
+		"typescript-eslint": "^8.58.0"
+	},
+	"peerDependencies": {
+		"typescript": "^6"
+	}
+}
