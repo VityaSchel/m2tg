@@ -52,6 +52,8 @@ TELEGRAM_BOT_TOKEN=""
 - To build a binary for your platform: `bun run build`
 - To build all binaries for all platforms: `bun run crossbuild`
 
+Medias sent together in a short time window (less than 5 seconds apart) are grouped and sent in a single gallery message to Telegram.
+
 ## License
 
 [MIT](./LICENSE)

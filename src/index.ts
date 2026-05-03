@@ -17,6 +17,8 @@ const PORT = Number(getEnv("PORT"));
 const HOMESERVER_TOKEN = getEnv("HOMESERVER_TOKEN");
 const APP_SERVICE_TOKEN = getEnv("APP_SERVICE_TOKEN");
 
+const APP_SERVICE_USER = getEnv("APP_SERVICE_USER");
+
 const TELEGRAM_CHAT_ID = getEnv("TELEGRAM_CHAT_ID");
 const TELEGRAM_BOT_TOKEN = getEnv("TELEGRAM_BOT_TOKEN");
 
@@ -97,7 +99,7 @@ async function tgCall(method: string, body: FormData | Record<string, string>) {
 		{
 			method: "POST",
 			headers: {
-				...(body instanceof FormData && {
+				...(!(body instanceof FormData) && {
 					"Content-Type": "application/json",
 				}),
 			},
@@ -114,6 +116,34 @@ async function sendText(html: string): Promise<void> {
 		parse_mode: "HTML",
 		disable_web_page_preview: "true",
 	});
+}
+
+async function sendMediaGroup(items: BufferedMedia[]): Promise<void> {
+	const form = new FormData();
+	form.append("chat_id", TELEGRAM_CHAT_ID);
+
+	const mediaArray = items.map((item, i) => {
+		const key = `file${i}`;
+		form.append(
+			key,
+			new Blob([item.blob], { type: item.contentType }),
+			item.filename,
+		);
+		const isVideo =
+			item.matrixMsgtype === "m.video" || item.contentType.startsWith("video/");
+		const entry: Record<string, string> = {
+			type: isVideo ? "video" : "photo",
+			media: `attach://${key}`,
+		};
+		if (item.caption) {
+			entry.caption = truncate(item.caption, CAPTION_LIMIT);
+			entry.parse_mode = "HTML";
+		}
+		return entry;
+	});
+
+	form.append("media", JSON.stringify(mediaArray));
+	await tgCall("sendMediaGroup", form);
 }
 
 async function sendMedia({
@@ -137,10 +167,13 @@ async function sendMedia({
 	let field: string;
 	let method: string;
 	if (matrixMsgtype === "m.image" || contentType.startsWith("image/")) {
-		if (contentType === "image/gif") method = "sendAnimation";
-		field = "animation";
-		method = "sendPhoto";
-		field = "photo";
+		if (contentType === "image/gif") {
+			method = "sendAnimation";
+			field = "animation";
+		} else {
+			method = "sendPhoto";
+			field = "photo";
+		}
 	} else if (matrixMsgtype === "m.video" || contentType.startsWith("video/")) {
 		method = "sendVideo";
 		field = "video";
@@ -159,6 +192,50 @@ async function sendMedia({
 }
 
 const processedEvents = new Set<string>();
+
+interface BufferedMedia {
+	blob: Blob;
+	contentType: string;
+	filename: string;
+	caption: string;
+	matrixMsgtype?: string;
+}
+
+const imageBuffer: BufferedMedia[] = [];
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+const MEDIA_GROUP_DELAY_MS = 5000;
+const MEDIA_GROUP_MAX = 10;
+
+async function doFlushImages(): Promise<void> {
+	if (imageBuffer.length === 0) return;
+	const batch = imageBuffer.splice(0);
+	if (batch.length === 1) {
+		await sendMedia(batch[0]!);
+	} else {
+		await sendMediaGroup(batch);
+	}
+}
+
+async function flushImages(): Promise<void> {
+	if (flushTimer !== null) {
+		clearTimeout(flushTimer);
+		flushTimer = null;
+	}
+	await doFlushImages();
+}
+
+function queueImage(item: BufferedMedia): void {
+	imageBuffer.push(item);
+	if (imageBuffer.length >= MEDIA_GROUP_MAX) {
+		flushImages().catch(console.error);
+		return;
+	}
+	if (flushTimer !== null) clearTimeout(flushTimer);
+	flushTimer = setTimeout(() => {
+		flushTimer = null;
+		doFlushImages().catch(console.error);
+	}, MEDIA_GROUP_DELAY_MS);
+}
 
 function extractBody(content: MatrixEventContent): string {
 	let body = content.body ?? "";
@@ -194,16 +271,37 @@ async function handleMessage({ content }: MatrixEvent): Promise<void> {
 	) {
 		const media = await downloadMedia(content.url);
 		if (!media) {
+			await flushImages();
 			await sendText(`[media unavailable] ${escapeHtml(text)}`);
 			return;
 		}
 		const filename =
 			content.filename || content.body || `file${guessExt(media.contentType)}`;
 		const caption = text && text !== filename ? escapeHtml(text) : "";
+		const contentType = content.info?.mimetype || media.contentType;
 
+		const isGroupable =
+			(msgtype === "m.image" ||
+				msgtype === "m.video" ||
+				contentType.startsWith("image/") ||
+				contentType.startsWith("video/")) &&
+			contentType !== "image/gif";
+
+		if (isGroupable) {
+			queueImage({
+				blob: media.blob,
+				contentType,
+				filename,
+				caption,
+				matrixMsgtype: msgtype,
+			});
+			return;
+		}
+
+		await flushImages();
 		await sendMedia({
 			blob: media.blob,
-			contentType: content.info?.mimetype || media.contentType,
+			contentType,
 			filename,
 			caption,
 			matrixMsgtype: msgtype,
@@ -212,10 +310,40 @@ async function handleMessage({ content }: MatrixEvent): Promise<void> {
 	}
 
 	if (!text) return;
+	await flushImages();
 	await sendText(escapeHtml(text));
 }
 
+async function joinRoom(roomId: string): Promise<void> {
+	const res = await fetch(
+		`${HOMESERVER_URL}/_matrix/client/v3/join/${encodeURIComponent(roomId)}?user_id=${encodeURIComponent(APP_SERVICE_USER)}`,
+		{
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${APP_SERVICE_TOKEN}`,
+				"Content-Type": "application/json",
+			},
+			body: "{}",
+		},
+	);
+	if (!res.ok) {
+		console.error(
+			`Failed to join room ${roomId}: ${res.status} ${await res.text()}`,
+		);
+	}
+}
+
 async function handleEvent(event: MatrixEvent): Promise<void> {
+	if (
+		event.type === "m.room.member" &&
+		event.content.membership === "invite" &&
+		event.room_id === ROOM_ID
+	) {
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		await joinRoom(event.room_id);
+		return;
+	}
+
 	if (event.room_id !== ROOM_ID) return;
 	if (event.sender.startsWith(`@m2tg:`)) return;
 	if (processedEvents.has(event.event_id)) return;
@@ -262,8 +390,10 @@ new Elysia()
 			"/_matrix/app/v1/transactions/:txnId",
 			async ({ params, body }) => {
 				if (!processedTxns.has(params.txnId)) {
-					body.events.forEach(handleEvent);
 					processedTxns.add(params.txnId);
+					for (const event of body.events) {
+						await handleEvent(event);
+					}
 				}
 				return {};
 			},
@@ -279,3 +409,5 @@ new Elysia()
 	.listen(PORT, ({ protocol, hostname, port }) => {
 		console.log(`M2tg listening on ${protocol}://${hostname}:${port}`);
 	});
+
+await joinRoom(ROOM_ID);
