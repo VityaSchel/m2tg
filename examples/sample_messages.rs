@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,7 +10,7 @@ use serde_json::{Value, json};
 use urlencoding::encode;
 
 const STEP_PAUSE: Duration = Duration::from_secs(4);
-const USAGE: &str = "usage: ENV_FILE=<staging env file> cargo run --example sample_messages -- [registration|register|join|send]\nWithout a command it prints the staging steps. ENV_FILE is required so production ./.env is never used";
+const USAGE: &str = "usage: ENV_FILE=<staging env file> cargo run --example sample_messages -- [registration|register|join|send]\nWithout a command it prints the staging steps.";
 const FORMATTING_SAMPLE: &str = r#"<p>{tag} formatting</p>
 <p><b>bold</b> <i>italic</i> <u>underline</u> <s>strike</s> <code>a &lt; b</code> <a href="https://example.org/?a=1&amp;b=2">link</a> <span data-mx-spoiler>spoiler</span></p>
 <blockquote>
@@ -219,6 +220,11 @@ fn print_preparation_steps(env_file: &str) {
 
 fn print_steps(env_file: &str, config: &Config, sender: &SampleSender) {
 	let example = format!("ENV_FILE={env_file} cargo run --example sample_messages --");
+	let sourced_env_file = if env_file.contains('/') {
+		env_file.to_string()
+	} else {
+		format!("./{env_file}")
+	};
 	let id = config.app_service_localpart();
 	let server_name = config.server_name();
 	let SampleSender {
@@ -228,7 +234,7 @@ fn print_steps(env_file: &str, config: &Config, sender: &SampleSender) {
 		r#"3. Register the output of the command below. On continuwuity, send `!admin appservices register` to the admin room with the YAML in a code block in the same message. On Synapse, save it to a file listed in app_service_config_files and restart. url comes from HOST and PORT; edit it if the homeserver reaches the bridge at another address.
    {example} registration
 4. Start the bridge on a host where the homeserver reaches url:
-   ENV_FILE={env_file} cargo run
+   (unset CREDENTIALS_DIRECTORY HOST TELEGRAM_API_BASE; set -a; . {sourced_env_file} && exec cargo run)
 5. Invite {bridge} into {room} and wait for `joined` in the bridge log. continuwuity rejects the invite while it cannot reach url.
 6. Register {user}:
    {example} register
@@ -241,6 +247,15 @@ fn print_steps(env_file: &str, config: &Config, sender: &SampleSender) {
 	);
 }
 
+fn staging_config(env_file: &str) -> Result<Config> {
+	let describe = || format!("reading {env_file}");
+	let file = std::fs::File::open(env_file).with_context(describe)?;
+	let vars: HashMap<String, String> = dotenvy::from_read_iter(file)
+		.map(|entry| entry.with_context(describe))
+		.collect::<Result<_>>()?;
+	Config::from_lookup(|key| vars.get(key).cloned())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
 	let env_file = env::var("ENV_FILE").unwrap_or_default();
@@ -250,11 +265,11 @@ async fn main() -> Result<()> {
 		print_preparation_steps(&env_file);
 	}
 	let _ = rustls::crypto::ring::default_provider().install_default();
+	let config = staging_config(&env_file);
 	let config = if command.is_none() {
-		Config::from_env()
-			.with_context(|| format!("fill {env_file}, then run this again for steps 3 to 9"))?
+		config.with_context(|| format!("fill {env_file}, then run this again for steps 3 to 9"))?
 	} else {
-		Config::from_env()?
+		config?
 	};
 	let sender = SampleSender::new(&config)?;
 	match command.as_deref() {

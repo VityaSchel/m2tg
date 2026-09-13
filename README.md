@@ -11,26 +11,43 @@ Matrix appservice that mirrors messages from a public Matrix room to a Telegram 
 
 - Download a binary (`x86_64` or `aarch64`) from [Releases](https://git.hloth.dev/hloth/m2tg/releases) (3 MB):
 
-```sh
-wget https://git.hloth.dev/hloth/m2tg/releases/download/v2.0.0/m2tg-linux-x86_64
-install -Dm755 m2tg-linux-x86_64 /usr/local/bin/m2tg
-```
+   ```sh
+   wget https://git.hloth.dev/hloth/m2tg/releases/download/v2.0.0/m2tg-linux-x86_64
+   install -Dm755 m2tg-linux-x86_64 /usr/local/bin/m2tg
+   ```
 
-Builds are [reproducible](./CONTRIBUTING.md#release-builds).
+   Builds are [reproducible](./CONTRIBUTING.md#release-builds).
 
 - Or build it with `cargo build --release --locked`. The host needs `ca-certificates`.
 
 ## Setup
 
-1. Add a [@BotFather](https://t.me/botfather) bot to your channel as an administrator with **Post Messages**.
-2. Fill in the [configuration](#configuration). To generate tokens, run `openssl rand -hex 32`.
-3. Run `m2tg registration` to print the appservice registration. On Continuwuity, send `!admin appservices register` to the admin room with the YAML in a code block in the same message. On Synapse, save it to a file listed in `app_service_config_files` and restart. `url` is `HOST` + `PORT`, edit it if the homeserver reaches m2tg at another address.
-4. Start `m2tg` or [set up a systemd service](./contrib/m2tg@.service).
-5. Invite `APP_SERVICE_USER` to the room. The room must be unencrypted. Continuwuity rejects the invite while it cannot reach `url`.
+1. Add your Telegram bot to a channel as an administrator with **Post Messages**.
+2. Install the systemd unit, the [configuration](#configuration) and the tokens for an instance named `example`, then fill `/etc/m2tg/example.env` except the tokens. In a source checkout, skip `wget` and use `contrib/m2tg@.service`.
+
+   ```sh
+   RAW=https://git.hloth.dev/hloth/m2tg/raw/branch/main
+   wget $RAW/contrib/m2tg@.service $RAW/.env.example
+   install -Dm644 m2tg@.service /etc/systemd/system/m2tg@.service
+   install -Dm600 .env.example /etc/m2tg/example.env
+   install -d -m700 /etc/m2tg/credentials/example
+   cd /etc/m2tg/credentials/example && umask 077
+   printf %s "$(openssl rand -hex 32)" > app-service-token
+   printf %s "$(openssl rand -hex 32)" > homeserver-token
+   printf %s '<BotFather token>' > telegram-bot-token
+   ```
+
+3. Run `(set -a; . /etc/m2tg/example.env && CREDENTIALS_DIRECTORY=/etc/m2tg/credentials/example exec m2tg registration)` to print the appservice registration.
+   - On Continuwuity, send `!admin appservices register` to the admin room with the YAML in a code block in the same message.
+   - On Synapse, save it to a file listed in `app_service_config_files` and restart.
+   - `url` is `HOST` + `PORT`, edit it if the homeserver reaches m2tg at another address.
+4. Run `systemctl daemon-reload && systemctl enable --now m2tg@example`.
+5. Invite `APP_SERVICE_USER` to the room. The room must be unencrypted. 
+   - Continuwuity rejects the invite while it cannot reach `url`.
 
 ## Configuration
 
-Set these in the environment or in `./.env` (see [.env.example](.env.example)):
+m2tg reads environment variables, set by systemd `EnvironmentFile=`, `docker run --env-file` or `set -a; . ./m2tg.env; set +a` in a shell (see [.env.example](.env.example)):
 
 | Variable                                 | Description                                    |
 | ---------------------------------------- | ---------------------------------------------- |
@@ -41,11 +58,13 @@ Set these in the environment or in `./.env` (see [.env.example](.env.example)):
 | `APP_SERVICE_TOKEN`, `HOMESERVER_TOKEN`  | `as_token` and `hs_token` of the registration  |
 | `TELEGRAM_CHAT_ID`, `TELEGRAM_BOT_TOKEN` | Chat id (`-100…` or `@channel`) and bot token  |
 
-Pass `ENV_FILE=path` to load env at a different file. Optionally, set `TELEGRAM_API_BASE` to replace the Bot API URL.
+Optionally, set `TELEGRAM_API_BASE` to replace the Bot API URL.
+
+When `$CREDENTIALS_DIRECTORY` is set, as by `LoadCredential=` in [m2tg@.service](./contrib/m2tg@.service), the three tokens are read from files named after their variables: `app-service-token`, `homeserver-token` and `telegram-bot-token`. Otherwise they are read from the environment.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). To test a staging bridge against a real homeserver and Telegram chat, run `ENV_FILE=.env.staging cargo run --example sample_messages`.
 
 ## License
 

@@ -1,21 +1,28 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use super::{Config, EnvLayers};
+use super::{Config, credential_file_name};
 
-struct TempFile(PathBuf);
+struct TempDir(PathBuf);
 
-impl TempFile {
-	fn new(name: &str, contents: &str) -> Self {
+impl TempDir {
+	fn with_files(name: &str, files: &[(&str, &str)]) -> Self {
 		let path = std::env::temp_dir().join(format!("m2tg-{}-{name}", std::process::id()));
-		std::fs::write(&path, contents).unwrap();
+		std::fs::create_dir_all(&path).unwrap();
+		for (file, contents) in files {
+			std::fs::write(path.join(file), contents).unwrap();
+		}
 		Self(path)
+	}
+
+	fn path(&self) -> &str {
+		self.0.to_str().unwrap()
 	}
 }
 
-impl Drop for TempFile {
+impl Drop for TempDir {
 	fn drop(&mut self) {
-		let _ = std::fs::remove_file(&self.0);
+		let _ = std::fs::remove_dir_all(&self.0);
 	}
 }
 
@@ -40,70 +47,82 @@ fn valid_vars() -> Vec<(&'static str, &'static str)> {
 	]
 }
 
-fn with_var(key: &'static str, value: &'static str) -> Vec<(&'static str, &'static str)> {
+fn with_var<'a>(key: &'static str, value: &'a str) -> Vec<(&'static str, &'a str)> {
 	let mut vars = valid_vars();
 	vars.retain(|(k, _)| *k != key);
 	vars.push((key, value));
 	vars
 }
 
-#[test]
-fn explicit_env_file_overrides_process_env() {
-	let file = TempFile::new("explicit.env", "PORT=1111\nHOST=\"0.0.0.0\"\n");
-	let missing_default = Path::new("/nonexistent/m2tg/.env");
-	let layers = EnvLayers::resolve(
-		Some(&file.0),
-		missing_default,
-		fake_env(&[("PORT", "2222"), ("ROOM_ID", "!env:test")]),
-	)
-	.unwrap();
-	assert_eq!(layers.get("PORT").as_deref(), Some("1111"));
-	assert_eq!(layers.get("HOST").as_deref(), Some("0.0.0.0"));
-	assert_eq!(layers.get("ROOM_ID").as_deref(), Some("!env:test"));
-	assert_eq!(layers.get("MISSING"), None);
+fn credential_files() -> Vec<(&'static str, &'static str)> {
+	vec![
+		("app-service-token", "file-as\n"),
+		("homeserver-token", "file-hs\n"),
+		("telegram-bot-token", "456:file\n"),
+	]
+}
+
+fn load_error(vars: &[(&str, &str)]) -> String {
+	Config::from_env_and_credentials(fake_env(vars))
+		.err()
+		.map(|e| e.to_string())
+		.unwrap_or_default()
 }
 
 #[test]
-fn empty_values_are_treated_as_unset() {
-	let file = TempFile::new("empty.env", "PORT=\nHOST=\"\"\nROOM_ID=!file:test\n");
-	let missing_default = Path::new("/nonexistent/m2tg/.env");
-	let env = || fake_env(&[("PORT", "2222"), ("ROOM_ID", "")]);
-	let explicit = EnvLayers::resolve(Some(&file.0), missing_default, env()).unwrap();
-	assert_eq!(explicit.get("PORT").as_deref(), Some("2222"));
-	assert_eq!(explicit.get("HOST"), None);
-	assert_eq!(explicit.get("ROOM_ID").as_deref(), Some("!file:test"));
-	let default = EnvLayers::resolve(None, &file.0, env()).unwrap();
-	assert_eq!(default.get("PORT").as_deref(), Some("2222"));
-	assert_eq!(default.get("ROOM_ID").as_deref(), Some("!file:test"));
-}
-
-#[test]
-fn default_env_file_yields_to_process_env() {
-	let file = TempFile::new("default.env", "PORT=1111\nHOST=0.0.0.0\n");
-	let layers = EnvLayers::resolve(None, &file.0, fake_env(&[("PORT", "2222")])).unwrap();
-	assert_eq!(layers.get("PORT").as_deref(), Some("2222"));
-	assert_eq!(layers.get("HOST").as_deref(), Some("0.0.0.0"));
-}
-
-#[test]
-fn missing_default_env_file_uses_process_env_only() {
-	let layers = EnvLayers::resolve(
-		None,
-		Path::new("/nonexistent/m2tg/.env"),
-		fake_env(&[("PORT", "2222")]),
-	)
-	.unwrap();
-	assert_eq!(layers.get("PORT").as_deref(), Some("2222"));
-}
-
-#[test]
-fn missing_explicit_env_file_is_an_error() {
-	let result = EnvLayers::resolve(
-		Some(Path::new("/nonexistent/m2tg/explicit.env")),
-		Path::new("/nonexistent/m2tg/.env"),
-		fake_env(&[]),
+fn derives_the_credential_file_name_from_the_variable() {
+	assert_eq!(
+		credential_file_name("APP_SERVICE_TOKEN"),
+		"app-service-token"
 	);
-	assert!(result.is_err());
+	assert_eq!(credential_file_name("HOMESERVER_TOKEN"), "homeserver-token");
+	assert_eq!(
+		credential_file_name("TELEGRAM_BOT_TOKEN"),
+		"telegram-bot-token"
+	);
+}
+
+#[test]
+fn tokens_come_from_credential_files_when_the_directory_is_set() {
+	let directory = TempDir::with_files("credentials", &credential_files());
+	let vars = with_var("CREDENTIALS_DIRECTORY", directory.path());
+	let config = Config::from_env_and_credentials(fake_env(&vars)).unwrap();
+	assert_eq!(config.app_service_token, "file-as");
+	assert_eq!(config.homeserver_token, "file-hs");
+	assert_eq!(config.telegram_bot_token, "456:file");
+	assert_eq!(config.telegram_chat_id, "42");
+}
+
+#[test]
+fn credentials_do_not_fall_back_to_the_environment() {
+	let directory = TempDir::with_files("missing", &credential_files()[..2]);
+	let vars = with_var("CREDENTIALS_DIRECTORY", directory.path());
+	let expected = format!(
+		"reading credential {}/telegram-bot-token: is LoadCredential=telegram-bot-token missing from the unit?",
+		directory.path()
+	);
+	assert_eq!(load_error(&vars), expected);
+}
+
+#[test]
+fn rejects_an_empty_credential() {
+	let mut files = credential_files();
+	files[1].1 = "\n";
+	let directory = TempDir::with_files("empty", &files);
+	let vars = with_var("CREDENTIALS_DIRECTORY", directory.path());
+	let expected = format!("{}/homeserver-token is empty", directory.path());
+	assert_eq!(load_error(&vars), expected);
+}
+
+#[test]
+fn tokens_come_from_the_environment_without_a_credentials_directory() {
+	for vars in [valid_vars(), with_var("CREDENTIALS_DIRECTORY", "")] {
+		let config = Config::from_env_and_credentials(fake_env(&vars)).unwrap();
+		assert_eq!(config.app_service_token, "as");
+		assert_eq!(config.homeserver_token, "hs");
+		assert_eq!(config.telegram_bot_token, "123:abc");
+	}
+	assert!(load_error(&with_var("HOMESERVER_TOKEN", "")).contains("HOMESERVER_TOKEN"));
 }
 
 #[test]
