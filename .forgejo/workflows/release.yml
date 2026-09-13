@@ -12,41 +12,58 @@ on:
 
 concurrency:
   group: m2tg-release-${{ forgejo.event.inputs.tag || forgejo.event.release.tag_name }}
-  cancel-in-progress: false
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: >-
+      /usr/bin/env
+      -u GITHUB_TOKEN -u FORGEJO_TOKEN
+      -u ACTIONS_RUNTIME_TOKEN
+      -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL
+      -u ACTIONS_CACHE_URL -u ACTIONS_RUNTIME_URL -u ACTIONS_RESULTS_URL
+      bash --noprofile --norc -e -o pipefail {0}
+
+env:
+  RELEASE_TAG: ${{ forgejo.event.inputs.tag || forgejo.event.release.tag_name }}
+  ARCHES: "x86_64 aarch64"
+  WORKSPACE: /opt/m2tg-release
+  CARGO_HOME: /opt/rust/cargo
+  RUSTUP_HOME: /opt/rust/rustup
+  CARGO_TERM_COLOR: never
+  CARGO_TERM_PROGRESS_WHEN: never
+  RUSTUP_VERSION: "1.29.0"
+  RUSTUP_SHA256: "4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10"
+  ZIG_VERSION: "0.16.0"
+  ZIG_SHA256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+  ZIGBUILD_VERSION: "0.22.3"
 
 jobs:
-  build:
-    runs-on: ["release-x86", "hetzner"]
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: >-
-          /usr/bin/env
-          -u GITHUB_TOKEN -u FORGEJO_TOKEN
-          -u ACTIONS_RUNTIME_TOKEN
-          -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL
-          -u ACTIONS_CACHE_URL -u ACTIONS_RUNTIME_URL -u ACTIONS_RESULTS_URL
-          bash --noprofile --norc -e -o pipefail {0}
+  vultr:
+    name: Build on Vultr
+    runs-on: ["build", "vultr"]
+    timeout-minutes: 45
     env:
-      RELEASE_TAG: ${{ forgejo.event.inputs.tag || forgejo.event.release.tag_name }}
-      ARCHES: "x86_64 aarch64"
-      WORKSPACE: /opt/m2tg-release
-      CARGO_HOME: /opt/rust/cargo
-      RUSTUP_HOME: /opt/rust/rustup
-      CARGO_TERM_COLOR: never
-      CARGO_TERM_PROGRESS_WHEN: never
-      RUSTUP_VERSION: "1.29.0"
-      RUSTUP_SHA256: "4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10"
-      ZIG_VERSION: "0.16.0"
-      ZIG_SHA256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
-      ZIGBUILD_VERSION: "0.22.3"
+      PROVIDER: vultr
+    outputs:
+      provider: ${{ steps.record.outputs.provider }}
+      commit: ${{ steps.record.outputs.commit }}
+      host: ${{ steps.record.outputs.host }}
+      cpu: ${{ steps.record.outputs.cpu }}
+      x86_64: ${{ steps.record.outputs.x86_64 }}
+      aarch64: ${{ steps.record.outputs.aarch64 }}
     steps:
-      - name: Verify CI environment
+      - &verify
+        name: Verify CI environment
         run: |
           leaked=$(env | grep -iE '(TOKEN|SECRET|PASSWORD|CREDENTIAL|KEY)=.' || true)
           [ -z "$leaked" ] || { echo "FATAL: privileged credential reachable by build code:"; echo "$leaked" | sed 's/=.*/=<redacted>/'; exit 1; }
 
-      - name: Check out the tag
+          vendor=$(tr -d '[:space:]' < /sys/class/dmi/id/sys_vendor)
+          [ "${vendor,,}" = "${PROVIDER:?}" ] || { echo "FATAL: the $PROVIDER build runs on a machine from '$vendor'"; exit 1; }
+
+      - &checkout
+        name: Check out the tag
         run: |
           : "${WORKSPACE:?}" "${RELEASE_TAG:?}"
           rm -rf "$WORKSPACE"
@@ -57,21 +74,23 @@ jobs:
           git remote add origin "$FORGEJO_SERVER_URL/$FORGEJO_REPOSITORY.git"
           git fetch -q --depth 1 origin "refs/tags/$RELEASE_TAG"
           git checkout -q FETCH_HEAD
-          echo "building $RELEASE_TAG at $(git rev-parse HEAD)"
+          echo "building $RELEASE_TAG at $(git rev-parse HEAD) on $PROVIDER"
 
-      - name: Install system packages
+      - &packages
+        name: Install system packages
         run: |
           missing=()
-          command -v cc >/dev/null 2>&1 || missing+=(gcc libc6-dev)
+          { command -v cc && [ -e /usr/lib/x86_64-linux-gnu/crt1.o ]; } >/dev/null 2>&1 || missing+=(gcc libc6-dev)
           command -v xz >/dev/null 2>&1 || missing+=(xz-utils)
           command -v jq >/dev/null 2>&1 || missing+=(jq)
           if [ ${#missing[@]} -gt 0 ]; then
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -y
-            apt-get install -y --no-install-recommends "${missing[@]}"
+            apt-get install -y --no-install-recommends -o DPkg::Lock::Timeout=300 "${missing[@]}"
           fi
 
-      - name: Install the pinned toolchain
+      - &toolchain
+        name: Install the pinned toolchain
         run: |
           curl -fsSLo /tmp/rustup-init \
             "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
@@ -83,7 +102,8 @@ jobs:
           cd "$WORKSPACE"
           "$CARGO_HOME/bin/rustup" --quiet show active-toolchain
 
-      - name: Install the pinned zig
+      - &zig
+        name: Install the pinned zig
         run: |
           tarball="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
           curl -fsSLo "/tmp/$tarball" "https://ziglang.org/download/${ZIG_VERSION}/${tarball}"
@@ -91,15 +111,91 @@ jobs:
           tar xf "/tmp/$tarball" -C /opt
           echo "/opt/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
 
-      - name: Install cargo-zigbuild
+      - &zigbuild
+        name: Install cargo-zigbuild
         run: |
           cd "$WORKSPACE"
           cargo install cargo-zigbuild --locked --version "$ZIGBUILD_VERSION"
 
-      - name: Build
+      - &build
+        name: Build
         run: cd "$WORKSPACE" && ./build.sh
 
+      - &record
+        name: Record the provider, commit, host and checksums
+        id: record
+        run: |
+          cd "$WORKSPACE"
+          commit=$(git rev-parse HEAD)
+          cpu=$(awk -F': ' '/^model name/ { print $2; exit }' /proc/cpuinfo)
+          {
+            echo "provider=$PROVIDER"
+            echo "commit=$commit"
+            echo "host=$(uname -n)"
+            echo "cpu=$cpu, $(nproc) threads"
+            for arch in $ARCHES; do
+              sum=$(sha256sum "target/$arch-unknown-linux-musl/release/m2tg")
+              echo "$arch=${sum%% *}"
+            done
+          } | tee -a "$GITHUB_OUTPUT"
+
+  hetzner:
+    name: Build on Hetzner and attach
+    needs: vultr
+    runs-on: ["release-x86", "hetzner"]
+    timeout-minutes: 60
+    env:
+      PROVIDER: hetzner
+    steps:
+      - *verify
+      - *checkout
+      - *packages
+      - *toolchain
+      - *zig
+      - *zigbuild
+      - *build
+      - *record
+
+      - name: Compare the Vultr and Hetzner builds
+        env:
+          VULTR_PROVIDER: ${{ needs.vultr.outputs.provider }}
+          VULTR_COMMIT: ${{ needs.vultr.outputs.commit }}
+          VULTR_HOST: ${{ needs.vultr.outputs.host }}
+          VULTR_CPU: ${{ needs.vultr.outputs.cpu }}
+          VULTR_X86_64: ${{ needs.vultr.outputs.x86_64 }}
+          VULTR_AARCH64: ${{ needs.vultr.outputs.aarch64 }}
+          HETZNER_PROVIDER: ${{ steps.record.outputs.provider }}
+          HETZNER_COMMIT: ${{ steps.record.outputs.commit }}
+          HETZNER_HOST: ${{ steps.record.outputs.host }}
+          HETZNER_CPU: ${{ steps.record.outputs.cpu }}
+          HETZNER_X86_64: ${{ steps.record.outputs.x86_64 }}
+          HETZNER_AARCH64: ${{ steps.record.outputs.aarch64 }}
+        run: |
+          echo "vultr:   $VULTR_HOST ($VULTR_CPU) at $VULTR_COMMIT, x86_64 ${VULTR_X86_64:-<none>}, aarch64 ${VULTR_AARCH64:-<none>}"
+          echo "hetzner: $HETZNER_HOST ($HETZNER_CPU) at $HETZNER_COMMIT, x86_64 ${HETZNER_X86_64:-<none>}, aarch64 ${HETZNER_AARCH64:-<none>}"
+
+          [[ $VULTR_PROVIDER = vultr && $HETZNER_PROVIDER = hetzner ]] || { echo "FATAL: expected builds on vultr and hetzner, got '$VULTR_PROVIDER' and '$HETZNER_PROVIDER'"; exit 1; }
+          [[ $VULTR_COMMIT =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: the Vultr build reported no commit"; exit 1; }
+          [ "$VULTR_COMMIT" = "$HETZNER_COMMIT" ] || { echo "FATAL: $RELEASE_TAG is $VULTR_COMMIT on Vultr but $HETZNER_COMMIT on Hetzner"; exit 1; }
+          [[ -n $VULTR_HOST && -n $HETZNER_HOST && $VULTR_HOST != "$HETZNER_HOST" ]] || { echo "FATAL: the Vultr and Hetzner builds did not run on distinct hosts"; exit 1; }
+
+          mismatch=0
+          for arch in $ARCHES; do
+            vultr="VULTR_${arch^^}"
+            hetzner="HETZNER_${arch^^}"
+            if [[ ${!vultr} =~ ^[0-9a-f]{64}$ && ${!vultr} = "${!hetzner}" ]]; then
+              echo "m2tg-linux-$arch matches: ${!vultr}"
+            else
+              printf 'm2tg-linux-%s has no matching sha256:\n  vultr:   %s\n  hetzner: %s\n' "$arch" "${!vultr:-<none>}" "${!hetzner:-<none>}"
+              mismatch=1
+            fi
+          done
+          [ "$mismatch" = 0 ] || { echo "FATAL: the Vultr and Hetzner builds differ; nothing is attached"; exit 1; }
+
       - name: Stage the assets and their checksums
+        env:
+          SHA256_X86_64: ${{ needs.vultr.outputs.x86_64 }}
+          SHA256_AARCH64: ${{ needs.vultr.outputs.aarch64 }}
         run: |
           cd "$WORKSPACE"
           rm -rf dist
@@ -109,7 +205,9 @@ jobs:
           done
           cd dist
           for arch in $ARCHES; do
-            sha256sum "m2tg-linux-$arch" | tee "m2tg-linux-$arch.sha256"
+            sum="SHA256_${arch^^}"
+            echo "${!sum:?}  m2tg-linux-$arch" | tee "m2tg-linux-$arch.sha256"
+            sha256sum -c "m2tg-linux-$arch.sha256"
           done
 
       - name: Attach to the release
@@ -126,15 +224,18 @@ jobs:
           }
           echo "release $RELEASE_TAG is id $id"
 
+          extra=$(curl -fsS -H "$auth" "$api/releases/$id/assets" \
+            | jq -r --arg arches "$ARCHES" '[.[].name] - [$arches | split(" ")[] | "m2tg-linux-\(.)", "m2tg-linux-\(.).sha256"] | .[]')
+          [ -z "$extra" ] || { echo "FATAL: release $RELEASE_TAG carries unexpected assets; review and remove them first:"; echo "$extra"; exit 1; }
+
           for arch in $ARCHES; do
             for name in "m2tg-linux-$arch" "m2tg-linux-$arch.sha256"; do
-              curl -fsS -H "$auth" "$api/releases/$id/assets" \
-                | jq -r --arg n "$name" '.[] | select(.name == $n) | .id' \
-                | while read -r old; do
-                    echo "replacing $name (attachment $old)"
-                    curl -fsS -X DELETE -H "$auth" "$api/releases/$id/assets/$old"
-                  done
+              old=$(curl -fsS -H "$auth" "$api/releases/$id/assets" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id')
               curl -fsS -H "$auth" -F "attachment=@$name" "$api/releases/$id/assets?name=$name" >/dev/null
               echo "attached $name"
+              for stale in $old; do
+                echo "removing the previous $name (attachment $stale)"
+                curl -fsS -X DELETE -H "$auth" "$api/releases/$id/assets/$stale"
+              done
             done
           done

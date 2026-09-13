@@ -4,4 +4,4 @@ CI runs `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings
 
 ## Release builds
 
-`./build.sh` builds reproducible static musl binaries for x86_64 and aarch64 and prints their SHA-256. It needs cargo-zigbuild 0.22.3 and zig 0.16.0 from the [official tarball](https://ziglang.org/download/). Release binaries are built by release.yml workflow on Linux.
+`./build.sh` builds reproducible static musl binaries for x86_64 and aarch64 and prints their SHA-256. It needs cargo-zigbuild 0.22.3 and zig 0.16.0 from the [official tarball](https://ziglang.org/download/). The release.yml workflow builds each tag on Vultr and Hetzner and attaches the binaries to its release only when their hashes match.
