@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: tag to build; its release must already exist
+        description: tag to build on both providers; attaches the binaries only if the tag has a release
         type: string
         required: true
 
@@ -213,15 +213,20 @@ jobs:
       - name: Attach to the release
         env:
           RELEASE_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ forgejo.event_name }}
         run: |
           cd "$WORKSPACE/dist"
           api="$FORGEJO_API_URL/repos/$FORGEJO_REPOSITORY"
           auth="Authorization: token $RELEASE_API_TOKEN"
 
-          id=$(curl -fsS -H "$auth" "$api/releases/tags/$RELEASE_TAG" | jq -er '.id') || {
-            echo "FATAL: no release exists for tag $RELEASE_TAG; create it in Forgejo first" >&2
-            exit 1
-          }
+          release=$(mktemp)
+          status=$(curl -sS -o "$release" -w '%{http_code}' -H "$auth" "$api/releases/tags/$RELEASE_TAG")
+          if [ "$status" = 404 ] && [ "$EVENT_NAME" = workflow_dispatch ]; then
+            echo "$RELEASE_TAG builds identically on vultr and hetzner; it has no release, so nothing is attached"
+            exit 0
+          fi
+          [ "$status" = 200 ] || { echo "FATAL: looking up the release of $RELEASE_TAG returned HTTP $status" >&2; exit 1; }
+          id=$(jq -er '.id' "$release")
           echo "release $RELEASE_TAG is id $id"
 
           extra=$(curl -fsS -H "$auth" "$api/releases/$id/assets" \
