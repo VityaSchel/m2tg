@@ -41,7 +41,7 @@ env:
 jobs:
   vultr:
     name: Build on Vultr
-    runs-on: ["build", "vultr"]
+    runs-on: ["debian", "4c8g", "vultr"]
     timeout-minutes: 45
     env:
       PROVIDER: vultr
@@ -142,7 +142,7 @@ jobs:
   hetzner:
     name: Build on Hetzner and attach
     needs: vultr
-    runs-on: ["release-x86", "hetzner"]
+    runs-on: ["debian", "8c16g", "hetzner"]
     timeout-minutes: 60
     env:
       PROVIDER: hetzner
