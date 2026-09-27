@@ -65,6 +65,16 @@ fn authorized_accepts_query_and_bearer_rejects_others() {
 }
 
 #[test]
+fn tokens_equal_requires_same_bytes_and_length() {
+	assert!(super::tokens_equal("secret", "secret"));
+	assert!(!super::tokens_equal("secreT", "secret"));
+	assert!(!super::tokens_equal("secret", "secrets"));
+	assert!(!super::tokens_equal("secrets", "secret"));
+	assert!(!super::tokens_equal("", "secret"));
+	assert!(super::tokens_equal("", ""));
+}
+
+#[test]
 fn recent_ids_evict_oldest_beyond_capacity() {
 	let mut ids = RecentIds::default();
 	for i in 0..=RECENT_IDS_CAPACITY {

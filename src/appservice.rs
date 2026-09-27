@@ -134,12 +134,26 @@ fn query_token_matches(req: &Request, token: &str) -> Option<bool> {
 	let value = query
 		.split('&')
 		.find_map(|pair| pair.strip_prefix("access_token="))?;
-	Some(urlencoding::decode(value).is_ok_and(|decoded| decoded == token))
+	Some(urlencoding::decode(value).is_ok_and(|decoded| tokens_equal(&decoded, token)))
 }
 
 fn header_token_matches(req: &Request, token: &str) -> Option<bool> {
 	let value = req.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
-	Some(value.strip_prefix("Bearer ") == Some(token))
+	Some(
+		value
+			.strip_prefix("Bearer ")
+			.is_some_and(|given| tokens_equal(given, token)),
+	)
+}
+
+// black_box keeps the optimizer from turning the fold into an early exit,
+// so the running time does not reveal how many leading bytes matched.
+fn tokens_equal(given: &str, expected: &str) -> bool {
+	let difference = given
+		.bytes()
+		.zip(expected.bytes())
+		.fold(0u8, |acc, (a, b)| std::hint::black_box(acc | (a ^ b)));
+	difference == 0 && given.len() == expected.len()
 }
 
 fn authorized(token: &str, req: &Request) -> bool {
