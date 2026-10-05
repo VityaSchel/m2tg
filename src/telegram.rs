@@ -131,6 +131,10 @@ fn visible_len(html: &str) -> usize {
 		.count()
 }
 
+pub fn fits_caption(html: &str) -> bool {
+	visible_len(html) <= CAPTION_LIMIT
+}
+
 pub fn has_visible_text(html: &str) -> bool {
 	tokens(html).any(|token| match token {
 		Token::Visible(text) => !text.chars().all(char::is_whitespace),

@@ -1,4 +1,7 @@
-use super::{MediaKind, has_visible_text, send_message, truncate, truncate_plain, visible_len};
+use super::{
+	CAPTION_LIMIT, MediaKind, fits_caption, has_visible_text, send_message, truncate,
+	truncate_plain, visible_len,
+};
 use crate::config::Config;
 use crate::matrix::Msgtype;
 use crate::request::RequestError;
@@ -20,6 +23,16 @@ fn has_visible_text_ignores_tags_and_whitespace() {
 	assert!(!has_visible_text("<b> \n</b>\u{a0}"));
 	assert!(has_visible_text("<b> x </b>"));
 	assert!(has_visible_text("&lt;"));
+}
+
+#[test]
+fn fits_caption_counts_only_visible_characters() {
+	let full = "a".repeat(CAPTION_LIMIT);
+	assert!(fits_caption(&format!(
+		"<a href=\"https://example.org/{full}\">{full}</a>"
+	)));
+	assert!(fits_caption(&"&amp;".repeat(CAPTION_LIMIT)));
+	assert!(!fits_caption(&format!("{full}b")));
 }
 
 #[test]

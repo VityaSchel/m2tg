@@ -13,17 +13,25 @@ use crate::request::RequestError;
 use crate::telegram::{self, MediaKind, OutMedia};
 
 const CHANNEL_CAPACITY: usize = 256;
-const ALBUM_DELAY: Duration = Duration::from_secs(5);
+const MEDIA_HOLD: Duration = Duration::from_secs(10);
 const ALBUM_LIMIT: usize = 10;
 const MAX_ATTEMPTS: u32 = 5;
 const MEDIA_UNAVAILABLE: &str = "[media unavailable]";
 
+pub struct Origin {
+	pub sender: String,
+	pub origin_server_ts: u64,
+}
+
 pub enum Job {
 	Text {
+		origin: Origin,
 		html: String,
 		plain: String,
+		is_reply: bool,
 	},
 	Media {
+		origin: Origin,
 		mxc: String,
 		msgtype: Msgtype,
 		mimetype: Option<String>,
@@ -40,8 +48,7 @@ pub fn spawn(config: Arc<Config>, http: Client) -> (Sender, JoinHandle<()>) {
 	let worker = Outbox {
 		config,
 		http,
-		album: Vec::new(),
-		album_deadline: None,
+		pending: None,
 	};
 	(sender, tokio::spawn(worker.run(receiver)))
 }
@@ -49,32 +56,67 @@ pub fn spawn(config: Arc<Config>, http: Client) -> (Sender, JoinHandle<()>) {
 struct Outbox {
 	config: Arc<Config>,
 	http: Client,
-	album: Vec<OutMedia>,
-	album_deadline: Option<Instant>,
+	pending: Option<Pending>,
+}
+
+struct Pending {
+	latest: Origin,
+	media: Vec<OutMedia>,
+	deadline: Instant,
+	merged_caption: bool,
+}
+
+impl Pending {
+	fn accepts_media(&self, origin: &Origin, media: &OutMedia) -> bool {
+		self.latest.sender == origin.sender
+			&& self.media.len() < ALBUM_LIMIT
+			&& media.kind.groupable()
+			&& self.media.iter().all(|item| item.kind.groupable())
+	}
+
+	fn accepts_caption(&self, origin: &Origin, html: &str) -> bool {
+		let gap = origin
+			.origin_server_ts
+			.saturating_sub(self.latest.origin_server_ts);
+		self.latest.sender == origin.sender
+			&& Duration::from_millis(gap) <= MEDIA_HOLD
+			&& self.media.iter().all(|item| item.caption_html.is_empty())
+			&& telegram::fits_caption(html)
+	}
 }
 
 impl Outbox {
 	async fn run(mut self, mut receiver: mpsc::Receiver<Job>) {
 		loop {
+			let deadline = self.pending.as_ref().map(|pending| pending.deadline);
 			tokio::select! {
 				biased;
-				() = wait_until(self.album_deadline) => self.flush_album().await,
+				() = wait_until(deadline) => self.flush_pending().await,
 				job = receiver.recv() => match job {
 					Some(job) => self.handle(job).await,
 					None => break,
 				},
 			}
 		}
-		self.flush_album().await;
+		self.flush_pending().await;
 	}
 
 	async fn handle(&mut self, job: Job) {
 		match job {
-			Job::Text { html, plain } => {
-				self.flush_album().await;
-				self.send_text(&html, &plain).await;
+			Job::Text {
+				origin,
+				html,
+				plain,
+				is_reply,
+			} => {
+				let captioned = !is_reply && self.caption_pending(&origin, &html, &plain);
+				self.flush_pending().await;
+				if !captioned {
+					self.send_text(&html, &plain).await;
+				}
 			}
 			Job::Media {
+				origin,
 				mxc,
 				msgtype,
 				mimetype,
@@ -90,7 +132,7 @@ impl Outbox {
 					Ok(media) => media,
 					Err(e) => {
 						tracing::error!("media {mxc} unavailable: {e}");
-						self.flush_album().await;
+						self.flush_pending().await;
 						let (html, plain) = if caption_plain.is_empty() {
 							(format::escape_html(&filename), filename)
 						} else {
@@ -111,53 +153,97 @@ impl Outbox {
 					filename
 				};
 				let kind = MediaKind::classify(msgtype, &content_type, media.bytes.len());
-				self.dispatch_media(OutMedia {
+				let media = OutMedia {
 					bytes: media.bytes,
 					content_type,
 					filename,
 					caption_html,
 					caption_plain,
 					kind,
-				})
-				.await;
+				};
+				self.dispatch_media(origin, media).await;
 			}
 		}
 	}
 
-	async fn dispatch_media(&mut self, media: OutMedia) {
-		if media.kind.groupable() {
-			self.album.push(media);
-			self.album_deadline = Some(Instant::now() + ALBUM_DELAY);
-			if self.album.len() >= ALBUM_LIMIT {
-				self.flush_album().await;
-			}
-		} else {
-			self.flush_album().await;
+	fn caption_pending(&mut self, origin: &Origin, html: &str, plain: &str) -> bool {
+		let Some(pending) = self
+			.pending
+			.as_mut()
+			.filter(|pending| pending.accepts_caption(origin, html))
+		else {
+			return false;
+		};
+		let first = &mut pending.media[0];
+		first.caption_html = html.to_string();
+		first.caption_plain = plain.to_string();
+		pending.merged_caption = true;
+		true
+	}
+
+	async fn dispatch_media(&mut self, origin: Origin, media: OutMedia) {
+		let joins_pending = self
+			.pending
+			.as_ref()
+			.is_some_and(|pending| pending.accepts_media(&origin, &media));
+		if !joins_pending {
+			self.flush_pending().await;
+		}
+		if !media.kind.groupable() && !media.caption_html.is_empty() {
 			self.send_single_media(&media).await;
+			return;
+		}
+		let deadline = Instant::now() + MEDIA_HOLD;
+		match &mut self.pending {
+			Some(pending) => {
+				pending.latest = origin;
+				pending.media.push(media);
+				pending.deadline = deadline;
+			}
+			None => {
+				self.pending = Some(Pending {
+					latest: origin,
+					media: vec![media],
+					deadline,
+					merged_caption: false,
+				});
+			}
 		}
 	}
 
-	async fn flush_album(&mut self) {
-		self.album_deadline = None;
-		let album = std::mem::take(&mut self.album);
-		match album.as_slice() {
-			[] => {}
+	async fn flush_pending(&mut self) {
+		let Some(pending) = self.pending.take() else {
+			return;
+		};
+		let first_delivered = match pending.media.as_slice() {
 			[single] => self.send_single_media(single).await,
-			items => {
-				let result = retry("sendMediaGroup", || {
-					telegram::send_media_group(&self.http, &self.config, items)
-				})
+			items => self.send_album(items).await,
+		};
+		if pending.merged_caption && !first_delivered {
+			let first = &pending.media[0];
+			self.send_text(&first.caption_html, &first.caption_plain)
 				.await;
-				match result {
-					Err(RequestError::Permanent { message }) => {
-						tracing::warn!("{message}; sending album items individually");
-						for item in items {
-							self.send_single_media(item).await;
-						}
-					}
-					result => log_dropped("sendMediaGroup", result),
+		}
+	}
+
+	async fn send_album(&self, items: &[OutMedia]) -> bool {
+		let result = retry("sendMediaGroup", || {
+			telegram::send_media_group(&self.http, &self.config, items)
+		})
+		.await;
+		match result {
+			Err(RequestError::Permanent { message }) => {
+				tracing::warn!("{message}; sending album items individually");
+				let Some((first, rest)) = items.split_first() else {
+					return false;
+				};
+				let first_delivered = self.send_single_media(first).await;
+				for item in rest {
+					self.send_single_media(item).await;
 				}
+				first_delivered
 			}
+			result => delivered("sendMediaGroup", result),
 		}
 	}
 
@@ -173,13 +259,15 @@ impl Outbox {
 					telegram::send_plain_message(&self.http, &self.config, plain)
 				})
 				.await;
-				log_dropped("sendMessage plain text", fallback);
+				delivered("sendMessage plain text", fallback);
 			}
-			result => log_dropped("sendMessage", result),
+			result => {
+				delivered("sendMessage", result);
+			}
 		}
 	}
 
-	async fn send_single_media(&self, media: &OutMedia) {
+	async fn send_single_media(&self, media: &OutMedia) -> bool {
 		let method = media.kind.method();
 		let result = retry(method, || {
 			telegram::send_media(&self.http, &self.config, media)
@@ -192,9 +280,9 @@ impl Outbox {
 					telegram::send_media_as_document(&self.http, &self.config, media)
 				})
 				.await;
-				log_dropped("sendDocument fallback", fallback);
+				delivered("sendDocument fallback", fallback)
 			}
-			result => log_dropped(method, result),
+			result => delivered(method, result),
 		}
 	}
 }
@@ -230,10 +318,10 @@ where
 	}
 }
 
-fn log_dropped(action: &str, result: Result<(), RequestError>) {
-	if let Err(e) = result {
-		tracing::error!("{action} failed, dropping: {e}");
-	}
+fn delivered(action: &str, result: Result<(), RequestError>) -> bool {
+	result
+		.inspect_err(|e| tracing::error!("{action} failed, dropping: {e}"))
+		.is_ok()
 }
 
 fn extension_for(content_type: &str) -> String {

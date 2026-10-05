@@ -1,10 +1,12 @@
 mod appservice;
+mod captions;
 mod failures;
 mod media;
 mod mock;
 mod text;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -19,6 +21,7 @@ use tower::ServiceExt;
 const ROOM_ID: &str = "!room:test";
 const BRIDGE_USER: &str = "@m2tg:test";
 const ALICE: &str = "@alice:test";
+const BOB: &str = "@bob:test";
 const HS_TOKEN: &str = "hs-secret";
 const AS_TOKEN: &str = "as-secret";
 const CHAT_ID: &str = "42";
@@ -122,7 +125,18 @@ fn html(event_id: &str, body: &str, formatted_body: &str) -> Value {
 }
 
 fn last_message() -> Value {
-	text("$last", LAST_MESSAGE)
+	from(BOB, text("$last", LAST_MESSAGE))
+}
+
+fn from(sender: &str, mut event: Value) -> Value {
+	event["sender"] = json!(sender);
+	event
+}
+
+fn sent_after(delay: Duration, mut event: Value) -> Value {
+	let origin_server_ts = event["origin_server_ts"].as_u64().unwrap();
+	event["origin_server_ts"] = json!(origin_server_ts + delay.as_millis() as u64);
+	event
 }
 
 fn mxc(media_id: &str) -> String {

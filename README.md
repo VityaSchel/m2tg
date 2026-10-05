@@ -3,7 +3,8 @@
 Matrix appservice that mirrors messages from a public Matrix room to a Telegram channel.
 
 - Supports formatting and media
-- Photos and videos sent together are grouped
+- Photos and videos sent within 10 s of each other are grouped
+- Media without a caption waits up to 10 s for one: if the next message is a text from the same sender, it becomes the caption unless it is a reply or too long, as Element Web sends captions separately
 - Edits, redactions and reactions are not forwarded
 - Failed sends are retried, then dropped with an error log
 

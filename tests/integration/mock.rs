@@ -138,11 +138,19 @@ impl Mock {
 	}
 
 	pub async fn wait_for_calls(&self, count: usize) -> Vec<TelegramCall> {
-		wait_for_len(&self.state.telegram_calls, count).await
+		self.wait_for_calls_within(count, WAIT_TIMEOUT).await
+	}
+
+	pub async fn wait_for_calls_within(
+		&self,
+		count: usize,
+		timeout: Duration,
+	) -> Vec<TelegramCall> {
+		wait_for_len(&self.state.telegram_calls, count, timeout).await
 	}
 
 	pub async fn wait_for_joins(&self, count: usize) -> Vec<Join> {
-		wait_for_len(&self.state.joins, count).await
+		wait_for_len(&self.state.joins, count, WAIT_TIMEOUT).await
 	}
 
 	pub fn calls(&self) -> Vec<TelegramCall> {
@@ -158,13 +166,13 @@ impl Mock {
 	}
 }
 
-async fn wait_for_len<T: Clone + Debug>(log: &Log<T>, count: usize) -> Vec<T> {
+async fn wait_for_len<T: Clone + Debug>(log: &Log<T>, count: usize, timeout: Duration) -> Vec<T> {
 	let mut receiver = log.subscribe();
 	let reached = receiver.wait_for(|items| items.len() >= count);
-	match tokio::time::timeout(WAIT_TIMEOUT, reached).await {
+	match tokio::time::timeout(timeout, reached).await {
 		Ok(Ok(items)) => items.clone(),
 		_ => panic!(
-			"expected {count} requests within {WAIT_TIMEOUT:?}, got {:#?}",
+			"expected {count} requests within {timeout:?}, got {:#?}",
 			log.borrow()
 		),
 	}

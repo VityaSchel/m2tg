@@ -55,6 +55,7 @@ fn steps() -> Vec<Step> {
 		Step("text with '<not a tag> & \"quotes\"' shown literally", vec![Text("{tag} plain <not a tag> & \"quotes\"".into())]),
 		Step("bold, italic, underline, strike, code 'a < b', link, spoiler, blockquote, 2 bullets, items 3. and 4., rust code block; no 'plain fallback'", vec![Html("{tag} formatting plain fallback", FORMATTING_SAMPLE)]),
 		Step("reply text only, no quoted lines; 'EDIT MUST NOT APPEAR' appears nowhere", vec![Reply("{tag} reply, quote must be gone"), Edit]),
+		Step("green photo captioned 'caption sent separately', no separate message", vec![Media("m.image", fixture!("green.png", "image/png"), None), Text("{tag} caption sent separately".into())]),
 		Step("red photo whose caption shows '<b>literal</b>' as text", vec![Media("m.image", fixture!("red.png", "image/png"), Some("{tag} captioned photo <b>literal</b>"))]),
 		Step("header text, then one album of red, green, blue", vec![
 			Text("{tag} album of 3 follows".into()),

@@ -49,6 +49,7 @@ fn event_with_missing_content_defaults() {
 	let event: Event = serde_json::from_str(json).unwrap();
 	assert!(event.content.msgtype.is_none());
 	assert!(event.state_key.is_none());
+	assert_eq!(event.origin_server_ts, 0);
 }
 
 #[test]
@@ -67,6 +68,13 @@ fn content_parses_relations() {
 	.unwrap();
 	assert!(reply.is_reply());
 	assert!(!reply.is_edit());
+}
+
+#[test]
+fn event_parses_origin_server_ts() {
+	let json = r#"{"type":"m.room.message","event_id":"$1","room_id":"!r","sender":"@a:b","origin_server_ts":1757750400000}"#;
+	let event: Event = serde_json::from_str(json).unwrap();
+	assert_eq!(event.origin_server_ts, 1_757_750_400_000);
 }
 
 #[test]

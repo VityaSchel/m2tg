@@ -2,16 +2,11 @@ use super::*;
 use crate::mock::WAIT_TIMEOUT;
 
 #[tokio::test]
-async fn single_image_then_text_sends_photo_then_message() {
+async fn single_image_sends_photo() {
 	let TestBridge { mock, app, .. } = TestBridge::start().await;
 	mock.serve_media("cat", "image/png", PNG);
 
-	put_txn(
-		&app,
-		"t1",
-		vec![image("$img", "cat"), text("$txt", "nice cat")],
-	)
-	.await;
+	put_txn(&app, "t1", vec![image("$img", "cat"), last_message()]).await;
 
 	let calls = mock.wait_for_calls(2).await;
 	assert_eq!(methods(&calls), ["sendPhoto", "sendMessage"]);
@@ -26,7 +21,7 @@ async fn single_image_then_text_sends_photo_then_message() {
 	assert_eq!(file.filename, "cat.png");
 	assert_eq!(file.content_type.as_deref(), Some("image/png"));
 	assert_eq!(file.bytes, PNG);
-	assert_eq!(calls[1].text(), "nice cat");
+	assert_eq!(calls[1].text(), LAST_MESSAGE);
 
 	let downloads = mock.downloads();
 	assert_eq!(downloads.len(), 1);
@@ -38,7 +33,7 @@ async fn single_image_then_text_sends_photo_then_message() {
 }
 
 #[tokio::test]
-async fn two_images_then_text_send_one_album_then_message() {
+async fn two_images_send_one_album() {
 	let TestBridge { mock, app, .. } = TestBridge::start().await;
 	mock.serve_media("first", "image/png", PNG);
 	mock.serve_media("second", "image/png", PNG);
@@ -46,18 +41,14 @@ async fn two_images_then_text_send_one_album_then_message() {
 	put_txn(
 		&app,
 		"t1",
-		vec![
-			image("$1", "first"),
-			image("$2", "second"),
-			text("$3", "two pictures"),
-		],
+		vec![image("$1", "first"), image("$2", "second"), last_message()],
 	)
 	.await;
 
 	let calls = mock.wait_for_calls(2).await;
 	assert_eq!(methods(&calls), ["sendMediaGroup", "sendMessage"]);
 	assert_album(&calls[0], &["first.png", "second.png"]);
-	assert_eq!(calls[1].text(), "two pictures");
+	assert_eq!(calls[1].text(), LAST_MESSAGE);
 }
 
 #[tokio::test]
@@ -74,10 +65,10 @@ async fn image_sent_as_file_uses_send_document() {
 		}),
 	);
 
-	put_txn(&app, "t1", vec![file]).await;
+	put_txn(&app, "t1", vec![file, last_message()]).await;
 
-	let calls = mock.wait_for_calls(1).await;
-	assert_eq!(methods(&calls), ["sendDocument"]);
+	let calls = mock.wait_for_calls(2).await;
+	assert_eq!(methods(&calls), ["sendDocument", "sendMessage"]);
 	assert_eq!(calls[0].files[0].field, "document");
 	assert_eq!(calls[0].files[0].filename, "diagram.png");
 }
@@ -91,10 +82,10 @@ async fn gif_uses_send_animation_with_downloaded_content_type() {
 		json!({ "msgtype": "m.image", "body": "party.gif", "url": mxc("party") }),
 	);
 
-	put_txn(&app, "t1", vec![gif]).await;
+	put_txn(&app, "t1", vec![gif, last_message()]).await;
 
-	let calls = mock.wait_for_calls(1).await;
-	assert_eq!(methods(&calls), ["sendAnimation"]);
+	let calls = mock.wait_for_calls(2).await;
+	assert_eq!(methods(&calls), ["sendAnimation", "sendMessage"]);
 	let file = &calls[0].files[0];
 	assert_eq!(file.field, "animation");
 	assert_eq!(file.filename, "party.gif");

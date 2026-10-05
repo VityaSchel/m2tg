@@ -4,15 +4,22 @@ use serde_json::json;
 
 use super::{RECENT_IDS_CAPACITY, RecentIds, message_job};
 use crate::matrix::{Content, Msgtype};
-use crate::outbox::Job;
+use crate::outbox::{Job, Origin};
 
 fn content(value: serde_json::Value) -> Content {
 	serde_json::from_value(value).unwrap()
 }
 
+fn origin() -> Origin {
+	Origin {
+		sender: "@alice:test".into(),
+		origin_server_ts: 0,
+	}
+}
+
 fn text_of(job: Option<Job>) -> Option<(String, String)> {
 	match job {
-		Some(Job::Text { html, plain }) => Some((html, plain)),
+		Some(Job::Text { html, plain, .. }) => Some((html, plain)),
 		Some(Job::Media { .. }) => panic!("expected a text job"),
 		None => None,
 	}
@@ -79,13 +86,13 @@ fn reply_fallback_is_stripped_only_for_replies() {
 		"m.relates_to": { "m.in_reply_to": { "event_id": "$orig" } }
 	}));
 	assert_eq!(
-		text_of(message_job(&reply)),
+		text_of(message_job(&reply, origin())),
 		Some(("the reply".into(), "the reply".into()))
 	);
 
 	let quote = content(json!({ "msgtype": "m.text", "body": "> <@alice:test> a famous quote" }));
 	assert_eq!(
-		text_of(message_job(&quote)),
+		text_of(message_job(&quote, origin())),
 		Some((
 			"&gt; &lt;@alice:test&gt; a famous quote".into(),
 			"> <@alice:test> a famous quote".into()
@@ -98,7 +105,7 @@ fn reply_fallback_is_stripped_only_for_replies() {
 		"m.relates_to": { "m.in_reply_to": { "event_id": "$orig" } }
 	}));
 	assert_eq!(
-		text_of(message_job(&reply_without_fallback)),
+		text_of(message_job(&reply_without_fallback, origin())),
 		Some((
 			"&gt; a famous quote\n\nagreed".into(),
 			"> a famous quote\n\nagreed".into()
@@ -107,16 +114,38 @@ fn reply_fallback_is_stripped_only_for_replies() {
 }
 
 #[test]
+fn text_jobs_mark_replies() {
+	let reply = content(json!({
+		"msgtype": "m.text",
+		"body": "answer",
+		"m.relates_to": { "m.in_reply_to": { "event_id": "$orig" } }
+	}));
+	assert!(matches!(
+		message_job(&reply, origin()),
+		Some(Job::Text { is_reply: true, .. })
+	));
+
+	let caption = content(json!({ "msgtype": "m.text", "body": "caption" }));
+	assert!(matches!(
+		message_job(&caption, origin()),
+		Some(Job::Text {
+			is_reply: false,
+			..
+		})
+	));
+}
+
+#[test]
 fn invisible_text_is_ignored() {
 	let blank = content(json!({ "msgtype": "m.text", "body": " \n " }));
-	assert!(message_job(&blank).is_none());
+	assert!(message_job(&blank, origin()).is_none());
 
 	let quote_only_reply = content(json!({
 		"msgtype": "m.text",
 		"body": "> <@alice:test> quoted",
 		"m.relates_to": { "m.in_reply_to": { "event_id": "$orig" } }
 	}));
-	assert!(message_job(&quote_only_reply).is_none());
+	assert!(message_job(&quote_only_reply, origin()).is_none());
 }
 
 #[test]
@@ -128,7 +157,7 @@ fn oversized_html_falls_back_to_escaped_plain() {
 		"formatted_body": "<b>x</b>".repeat(5000)
 	}));
 	assert_eq!(
-		text_of(message_job(&huge)),
+		text_of(message_job(&huge, origin())),
 		Some(("a &lt; b".into(), "a < b".into()))
 	);
 }
@@ -148,7 +177,8 @@ fn media_job_sanitizes_filename_and_omits_duplicate_caption() {
 		filename,
 		caption_html,
 		caption_plain,
-	}) = message_job(&image)
+		..
+	}) = message_job(&image, origin())
 	else {
 		panic!("expected a media job");
 	};
@@ -172,7 +202,7 @@ fn media_job_keeps_distinct_caption() {
 		caption_html,
 		caption_plain,
 		..
-	}) = message_job(&video)
+	}) = message_job(&video, origin())
 	else {
 		panic!("expected a media job");
 	};
@@ -185,7 +215,7 @@ fn media_job_keeps_distinct_caption() {
 fn media_without_url_is_forwarded_as_text() {
 	let image = content(json!({ "msgtype": "m.image", "body": "broken" }));
 	assert_eq!(
-		text_of(message_job(&image)),
+		text_of(message_job(&image, origin())),
 		Some(("broken".into(), "broken".into()))
 	);
 }

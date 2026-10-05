@@ -21,6 +21,8 @@ pub struct Event {
 	pub event_id: String,
 	pub room_id: String,
 	pub sender: String,
+	#[serde(default)]
+	pub origin_server_ts: u64,
 	pub state_key: Option<String>,
 	#[serde(default)]
 	pub content: Content,

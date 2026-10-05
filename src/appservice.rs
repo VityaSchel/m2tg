@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::Config;
 use crate::matrix::{self, Content, Event, Msgtype, Transaction};
-use crate::outbox::{self, Job};
+use crate::outbox::{self, Job, Origin};
 use crate::{format, telegram};
 
 const BODY_LIMIT: usize = 16 * 1024 * 1024;
@@ -227,7 +227,11 @@ fn handle_event(state: &AppState, event: &Event) -> Option<Job> {
 		"m.room.message"
 			if event.sender != state.config.app_service_user && !event.content.is_edit() =>
 		{
-			message_job(&event.content)
+			let origin = Origin {
+				sender: event.sender.clone(),
+				origin_server_ts: event.origin_server_ts,
+			};
+			message_job(&event.content, origin)
 		}
 		_ => None,
 	}
@@ -250,7 +254,7 @@ fn handle_membership(state: &AppState, event: &Event) {
 	}
 }
 
-fn message_job(content: &Content) -> Option<Job> {
+fn message_job(content: &Content, origin: Origin) -> Option<Job> {
 	let body = content.body.as_deref().unwrap_or_default();
 	let text = if content.is_reply() {
 		matrix::strip_reply_fallback(body)
@@ -261,15 +265,20 @@ fn message_job(content: &Content) -> Option<Job> {
 		(
 			Some(msgtype @ (Msgtype::Image | Msgtype::Video | Msgtype::Audio | Msgtype::File)),
 			Some(mxc),
-		) => Some(media_job(content, msgtype, mxc, text)),
+		) => Some(media_job(content, origin, msgtype, mxc, text)),
 		_ => {
 			let html = telegram_html(content, &text)?;
-			Some(Job::Text { html, plain: text })
+			Some(Job::Text {
+				origin,
+				html,
+				plain: text,
+				is_reply: content.is_reply(),
+			})
 		}
 	}
 }
 
-fn media_job(content: &Content, msgtype: Msgtype, mxc: &str, text: String) -> Job {
+fn media_job(content: &Content, origin: Origin, msgtype: Msgtype, mxc: &str, text: String) -> Job {
 	let original_name = content
 		.filename
 		.as_deref()
@@ -286,6 +295,7 @@ fn media_job(content: &Content, msgtype: Msgtype, mxc: &str, text: String) -> Jo
 		None => (String::new(), String::new()),
 	};
 	Job::Media {
+		origin,
 		mxc: mxc.to_string(),
 		msgtype,
 		mimetype: content.info.as_ref().and_then(|info| info.mimetype.clone()),
